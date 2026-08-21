@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package pb;
+
+option go_package = "github.com/dhanraj-12/aegis/api/proto;pb";
+
+// The vector_clock map each Node Id to its request count.
+message GCounter {
+    map<string,uint64> vector_clock = 1;
+}
+
+message GossipPayload {
+    string sender_id = 1; // The ID of the node sending the gossip message.
+    int64 timestamp = 2; // The timestamp when the gossip message was created.
+    map<string,GCounter> states = 3; // The states of the nodes.
+}
+
