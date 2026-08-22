@@ -41,11 +41,10 @@ aegis/
 │   ├── crdt/           # G-Counter and Sliding Window implementation (thread-safe, sync.RWMutex)
 │   ├── gossip/         # UDP listener, periodic broadcaster, peer discovery, and state merging
 │   └── proxy/          # httputil.ReverseProxy handler, middleware, and 429 response enforcement
-├── deployments/        # Dockerfiles, Docker Compose clusters, Systemd unit files, and Helm charts
 ├── config.yaml         # Default runtime configuration
 ├── go.mod              # Go module definition
 ├── go.sum              # Go checksums
-├── Makefile            # Automation commands for protoc, tests, and builds
+├── README.md           # Project introduction and overview
 └── GEMINI.md           # AI Agent Context & Instruction Manual
 ```
 
@@ -101,8 +100,8 @@ GOOS=darwin GOARCH=arm64 go build -o bin/aegis-darwin-arm64 cmd/proxy/main.go
 ## 6. Phased Roadmap
 
 - [x] **Phase 1A: Setup & Config** — Project scaffolding, YAML parser (`pkg/config`), and baseline CLI flags.
-- [ ] **Phase 1B: Protobuf Schema** — Define `state.proto` with G-Counter vector clocks and compile Go stubs.
-- [ ] **Phase 1C: CRDT Engine** — Thread-safe G-Counter and Sliding Window logic with unit tests (`pkg/crdt`).
+- [x] **Phase 1B: Protobuf Schema** - Define `state.proto` with G-Counter vector clocks and compile Go stubs.
+- [x] **Phase 1C: CRDT Engine** - Thread-safe G-Counter and Sliding Window logic with unit tests (`pkg/crdt`).
 - [ ] **Phase 1D: UDP Gossip** — Outbound broadcast ticker and inbound UDP listener with state merging (`pkg/gossip`).
 - [ ] **Phase 1E: Reverse Proxy** — `httputil.ReverseProxy` integration, middleware, and `HTTP 429` enforcement (`pkg/proxy`).
 - [ ] **Phase 2: Containerization** — Multi-stage distroless `Dockerfile` and local multi-node `docker-compose.yaml`.
