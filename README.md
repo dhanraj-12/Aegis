@@ -28,7 +28,7 @@ The following milestones have been completed:
 
 Currently working towards:
 
-- [ ] UDP gossip protocol for peer state synchronization (`pkg/gossip`)
+- [ ] UDP gossip protocol for peer state synchronization (`pkg/gossip`) - *In Progress*
 - [ ] Reverse proxy with HTTP 429 enforcement (`pkg/proxy`)
 
 ---
