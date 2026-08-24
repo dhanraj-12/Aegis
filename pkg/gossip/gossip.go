@@ -43,7 +43,7 @@ func (e *Engine) listenUDP() {
 	defer conn.Close()
 	log.Printf("[Gossip] Listen Peer State on UDP port %d", e.cfg.GossipPort)
 
-	buffer := make([]byte,65507) // Standard MTU size to prevent data truncation
+	buffer := make([]byte,1400) // Standard safe MTU limit to avoid IP fragmentation
 
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(buffer)
@@ -91,7 +91,7 @@ func (e *Engine) broadcastUDP() {
 	udpConn := conn.(*net.UDPConn)
 
 	// broadcaast every 500 millisecond
-	ticker := time.NewTicker(500 * time.Microsecond)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for range ticker.C {
