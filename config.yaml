@@ -3,4 +3,6 @@ GossipPort: 8081
 Peers: 
   - "127.0.0.1:9000"
   - "127.0.0.1:9001"
-RateLimit: 100
+
+AuthRateLimit: 100
+IPRateLimit: 10

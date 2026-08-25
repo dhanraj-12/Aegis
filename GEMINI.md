@@ -104,7 +104,7 @@ GOOS=darwin GOARCH=arm64 go build -o bin/aegis-darwin-arm64 cmd/proxy/main.go
 - [x] **Phase 1B: Protobuf Schema** - Define `state.proto` with G-Counter vector clocks and compile Go stubs.
 - [x] **Phase 1C: CRDT Engine** - Thread-safe G-Counter and Sliding Window logic with unit tests (`pkg/crdt`).
 - [x] **Phase 1D: UDP Gossip** — Outbound broadcast ticker and inbound UDP listener with state merging (`pkg/gossip`).
-- [ ] **Phase 1E: Reverse Proxy** — `httputil.ReverseProxy` integration, middleware, and `HTTP 429` enforcement (`pkg/proxy`).
+- [x] **Phase 1E: Reverse Proxy** — `httputil.ReverseProxy` integration, middleware, and `HTTP 429` enforcement (`cmd/proxy`).
 - [ ] **Phase 2: Containerization** — Multi-stage distroless `Dockerfile` and local multi-node `docker-compose.yaml`.
 - [ ] **Phase 3: Chaos & Benchmarking** — Toxiproxy partition tests and Vegeta latency reports ($p_{50}, p_{99}$).
 - [ ] **Phase 4: Cloud-Native Delivery** — Kubernetes manifests (Sidecar & Gateway modes) and Helm chart packaging.

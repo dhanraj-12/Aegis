@@ -9,10 +9,11 @@ import (
 )
 
 type Config struct {
-	ProxyPort 	int 		`yaml:"ProxyPort"`
-	GossipPort 	int 		`yaml:"GossipPort"`
-	Peers 		[]string 	`yaml:"Peers"`
-	RateLimit	int 		`yaml:"RateLimit"`
+	ProxyPort 		int 		`yaml:"ProxyPort"`
+	GossipPort 		int 		`yaml:"GossipPort"`
+	Peers 			[]string 	`yaml:"Peers"`
+	AuthRateLimit	int 		`yaml:"AuthRateLimit"`
+	IPRateLimit		int			`yaml:"IPRateLimit"`
 }
 
 func LoadConfig(path string) (*Config , error) {
@@ -27,7 +28,7 @@ func LoadConfig(path string) (*Config , error) {
 		return nil, fmt.Errorf("failed to unmarshal config file: %w", err)
 	}
 	
-	log.Printf("Config loaded: ProxyPort: %d, GossipPort: %d, Peers: %v, RateLimit: %d\n", config.ProxyPort, config.GossipPort, config.Peers, config.RateLimit)
+	log.Printf("Config loaded: ProxyPort: %d, GossipPort: %d, Peers: %v, AuthRateLimite: %d, IPRateLimite: %d\n", config.ProxyPort, config.GossipPort, config.Peers, config.AuthRateLimit, config.IPRateLimit)
 	return &config, nil
 }
 

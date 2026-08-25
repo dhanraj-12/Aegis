@@ -29,7 +29,7 @@ The following milestones have been completed:
 Currently working towards:
 
 - [x] UDP gossip protocol for peer state synchronization (`pkg/gossip`)
-- [ ] Reverse proxy with HTTP 429 enforcement (`pkg/proxy`)
+- [x] Reverse proxy with HTTP 429 enforcement (`cmd/proxy`)
 
 ---
 *See [GEMINI.md](GEMINI.md) for the full development guide, architecture details, and coding standards.*
