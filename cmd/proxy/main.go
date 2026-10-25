@@ -1,18 +1,22 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/dhanraj-12/Aegis/pkg/config"
 	"github.com/dhanraj-12/Aegis/pkg/crdt"
 	"github.com/dhanraj-12/Aegis/pkg/gossip"
+	"github.com/dhanraj-12/Aegis/pkg/shield"
 )
 
 func main() {
@@ -24,58 +28,64 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	localNodeID := fmt.Sprintf("node-%d", cfg.GossipPort)
-	window, err := time.ParseDuration(cfg.Protection.RateLimit.Window)
-	if err != nil {
-		window = 1 * time.Minute
-	}
-	limiter := crdt.NewLimiter(localNodeID, window)
-	defer limiter.Close()
-
-	gossipEngine := gossip.NewEngine(limiter, localNodeID, cfg)
-	gossipEngine.Start()
-
+	// 1. Parse upstream backend URL
 	backendURL, err := url.Parse(cfg.BackendURL)
 	if err != nil {
 		log.Fatalf("Failed to parse BackendURL: %v", err)
 	}
+
+	// 2. Initialize CRDT rate limiter and gossip engine if enabled by protection mode
+	var rateLimiter *crdt.Limiter
+	var gossipEngine *gossip.Engine
+	localNodeID := fmt.Sprintf("node-%d", cfg.GossipPort)
+
+	if cfg.Protection.Mode != "ConcurrencyOnly" {
+		window, err := time.ParseDuration(cfg.Protection.RateLimit.Window)
+		if err != nil {
+			window = 1 * time.Minute
+		}
+		rateLimiter = crdt.NewLimiter(localNodeID, window)
+		defer rateLimiter.Close()
+
+		gossipEngine = gossip.NewEngine(rateLimiter, localNodeID, cfg)
+		gossipEngine.Start()
+	}
+
+	// 3. Build unified Guard strategy (RateLimitOnly, ConcurrencyOnly, or Strict)
+	guard := shield.BuildGuard(cfg, rateLimiter)
+	defer guard.Close()
+
+	// 4. Initialize reverse proxy
 	proxy := httputil.NewSingleHostReverseProxy(backendURL)
 
-	http.HandleFunc("/", rateLimitMiddleware(limiter, cfg, proxy, backendURL.Host))
+	// 5. Mount protection middleware
+	http.Handle("/", shield.ProtectionMiddleware(guard, cfg, proxy, backendURL.Host))
 
-	log.Printf("[System] Aegis Reverse Proxy listening on HTTP :%d -> Upstream: %s", cfg.ProxyPort, cfg.BackendURL)
-
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", cfg.ProxyPort), nil); err != nil {
-		log.Fatalf("Server crashed: %v", err)
+	// 6. Graceful shutdown handler
+	server := &http.Server{
+		Addr: fmt.Sprintf(":%d", cfg.ProxyPort),
 	}
-}
 
-func rateLimitMiddleware(limiter *crdt.Limiter, cfg *config.Config, proxy *httputil.ReverseProxy, targetHost string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var identifier string
-		var limit uint64
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		sig := <-sigCh
+		log.Printf("[System] Caught signal %v, initiating graceful shutdown...", sig)
 
-		authHeader := r.Header.Get("Authorization")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-		if authHeader != "" {
-			token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer"))
-			identifier = fmt.Sprintf("auth:%s", token)
-			limit = uint64(cfg.Protection.RateLimit.AuthRateLimit)
-		} else {
-			ip := strings.Split(r.RemoteAddr, ":")[0]
-			identifier = fmt.Sprintf("ip:%s", ip)
-			limit = uint64(cfg.Protection.RateLimit.IPRateLimit)
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("[System] HTTP server shutdown error: %v", err)
 		}
+		_ = guard.Close()
+		log.Println("[System] Aegis Reverse Proxy shutdown complete.")
+	}()
 
-		if !limiter.Allow(identifier, limit) {
-			log.Printf("[BLOCK] %s exceeded limit of %d", identifier, limit)
-			http.Error(w, "429 Too Many Requests - Aegis Shield Activated", http.StatusTooManyRequests)
-			return
-		}
+	log.Printf("[System] Aegis Reverse Proxy listening on HTTP :%d (Mode: %s) -> Upstream: %s",
+		cfg.ProxyPort, cfg.Protection.Mode, cfg.BackendURL)
 
-		r.Host = targetHost
-
-		log.Printf("[ALLOW] %s forwarded", identifier)
-		proxy.ServeHTTP(w, r)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Server crashed: %v", err)
 	}
 }
