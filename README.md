@@ -1,21 +1,28 @@
 # Aegis
 
-Aegis is a high-performance, decentralized distributed rate limiter built in Go.
+Aegis is a high-performance, decentralized distributed rate limiter and load shedding reverse proxy built in Go.
 
-Traditional rate limiters often rely on centralized data stores (like Redis), which can introduce latency and become bottlenecks in the critical path of API gateways.
+Traditional rate limiters often rely on centralized data stores (like Redis), which introduce latency and become bottlenecks in the critical path of API gateways.
 Aegis eliminates this single point of failure by evaluating rate limits entirely in-memory and sharing state across nodes through peer-to-peer communication.
+In addition, Aegis incorporates local adaptive concurrency limiting (TCP Vegas gradient) to shed load and prevent cascading backend worker exhaustion.
 
 ## Core Concepts
 
 * **Decentralized State:** Pairs Conflict-free Replicated Data Types (CRDTs) with an asynchronous background UDP gossip protocol to aggregate rate limit data across the cluster.
 * **Extreme Performance:** Designed for sub-millisecond, in-memory rate-limit evaluation, ensuring your API gateway is never blocked by a database lookup.
+* **Dual Protection Shield:** Combines cluster-wide velocity rate limiting (requests/minute) with local TCP Vegas adaptive concurrency control (in-flight request load shedding).
 * **Eventual Consistency:** Nodes efficiently broadcast their local time-bucketed counts to peers in the background, merging state seamlessly without distributed locking.
 
 ## How It Works
 
-Aegis uses a **Sliding Window Counter** built on top of time-bucketed G-Counters (a type of CRDT).
-Each node maintains its own local counters and periodically gossips its state to peers over UDP using Protocol Buffers.
-When a rate-limit check happens, the sliding window algorithm calculates a weighted estimate from the current and previous time buckets to decide whether to allow or reject (HTTP 429) the request.
+Aegis provides two complementary layers of protection orchestrated via a pluggable [`Guard`](file:///home/dj/Drive2/aegis/pkg/shield/shield.go#L17) interface:
+
+1. **Velocity Rate Limiting (`pkg/crdt`):** Uses a **Sliding Window Counter** built on top of time-bucketed G-Counters (a CRDT).
+   Each node maintains its own local counters and periodically gossips its state to peers over UDP using Protocol Buffers.
+   When a rate-limit check happens, the sliding window algorithm calculates a weighted estimate from the current and previous time buckets to decide whether to allow or reject (`HTTP 429 Too Many Requests`).
+
+2. **Adaptive Concurrency Limiting (`pkg/shield`):** Uses the **TCP Vegas gradient queue-delay algorithm** to dynamically measure upstream round-trip latency (RTT).
+   If queue backlogs build up because backend dependencies are slow, Aegis dynamically sheds excess load (`HTTP 503 Service Unavailable`) before worker pools exhaust.
 
 ---
 
@@ -77,7 +84,7 @@ flowchart TD
 
 Aegis decouples rate limit evaluation from cross-node synchronization:
 
-* **The Critical Path (<1ms):** Requests are evaluated purely in-memory on the receiving node using local CRDT state.
+* **The Critical Path (<1ms):** Requests are evaluated purely in-memory on the receiving node using local CRDT state and adaptive concurrency gates.
   No synchronous database queries or distributed locks block the HTTP proxy path.
 * **The Background Path:** Nodes continuously gossip state deltas to peers asynchronously over UDP using Protocol Buffers.
 * **Convergence:** The CRDT state convergence guarantees eventual consistency across all nodes without centralized coordination.
@@ -95,21 +102,21 @@ flowchart TD
 
         subgraph Node1["Aegis Node 1"]
             direction TB
-            Proxy1["Reverse Proxy"]:::innerDark
+            Proxy1["Reverse Proxy (pkg/shield)"]:::innerDark
             CRDT1[("In-Memory CRDT Store")]:::innerDark
             Proxy1 --- CRDT1
         end
 
         subgraph Node2["Aegis Node 2"]
             direction TB
-            Proxy2["Reverse Proxy"]:::innerDark
+            Proxy2["Reverse Proxy (pkg/shield)"]:::innerDark
             CRDT2[("In-Memory CRDT Store")]:::innerDark
             Proxy2 --- CRDT2
         end
 
         subgraph Node3["Aegis Node 3"]
             direction TB
-            Proxy3["Reverse Proxy"]:::innerDark
+            Proxy3["Reverse Proxy (pkg/shield)"]:::innerDark
             CRDT3[("In-Memory CRDT Store")]:::innerDark
             Proxy3 --- CRDT3
         end
@@ -127,9 +134,9 @@ flowchart TD
     Proxy2 -->|"Forward Allowed Traffic (<1ms)"| Backend
     Proxy3 -->|"Forward Allowed Traffic (<1ms)"| Backend
 
-    Proxy1 -.->|"429 Rate Limited"| Clients
-    Proxy2 -.->|"429 Rate Limited"| Clients
-    Proxy3 -.->|"429 Rate Limited"| Clients
+    Proxy1 -.->|"429 Rate Limit / 503 Concurrency Shed"| Clients
+    Proxy2 -.->|"429 Rate Limit / 503 Concurrency Shed"| Clients
+    Proxy3 -.->|"429 Rate Limit / 503 Concurrency Shed"| Clients
 
     style AegisCluster fill:#09090b,stroke:#ffffff,stroke-width:1.5px,color:#ffffff
     style Node1 fill:#18181b,stroke:#ffffff,stroke-width:1px,color:#ffffff
@@ -142,20 +149,22 @@ flowchart TD
 
 ### 3. Aegis Low-Level Design (LLD)
 
-Internally, an Aegis node executes two separate concurrency loops:
+Internally, an Aegis node executes a unified protection pipeline orchestrated by [`pkg/shield`](file:///home/dj/Drive2/aegis/pkg/shield):
 
 1. **Synchronous Request Processing:**
-   * Inbound HTTP requests pass through the reverse proxy handler.
-   * The identifier is extracted using the dynamic 4-tier hierarchy:
-     `X-API-Key` -> `Authorization: Bearer` -> `X-Forwarded-For` / `CF-Connecting-IP` -> `RemoteAddr`.
-   * [`crdt.Limiter`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go#L10) retrieves the current and previous time buckets.
-   * The sliding window estimate is computed:
-     $\text{EstimatedCount} = (\text{PrevCount} \times \text{Overlap\%}) + \text{CurrCount}$.
-   * If $\text{EstimatedCount} \ge \text{Limit}$, the request is immediately rejected with `HTTP 429 Too Many Requests`.
-   * If permitted, the local node counter in [`crdt.GCounter`](file:///home/dj/Drive2/aegis/pkg/crdt/gcounter.go#L6) is incremented and the request forwards to upstream.
+   * Inbound HTTP requests pass through [`ProtectionMiddleware`](file:///home/dj/Drive2/aegis/pkg/shield/middleware.go#L62).
+   * Identifier and limit are extracted using the 4-tier hierarchy:
+     `X-API-Key` -> `Authorization: Bearer` -> `CF-Connecting-IP` / `X-Forwarded-For` -> `net.SplitHostPort(RemoteAddr)`.
+   * [`Guard.Acquire`](file:///home/dj/Drive2/aegis/pkg/shield/shield.go#L20) evaluates protection rules based on configured `Protection.Mode`:
+     * **Rate Limiting:** Checks sliding window counter across time buckets via [`crdt.Limiter`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go).
+       Rejects with `HTTP 429 Too Many Requests` if velocity threshold is exceeded.
+     * **Concurrency Limiting:** Checks active in-flight count against the dynamic limit via [`AdaptiveConcurrencyGuard`](file:///home/dj/Drive2/aegis/pkg/shield/concurrency.go).
+       Rejects with `HTTP 503 Service Unavailable` if concurrency ceiling is reached.
+   * If permitted, the request is forwarded to the upstream backend.
+   * The deferred `DoneFunc` records response status and elapsed round-trip latency (RTT) to dynamically adjust Vegas limits.
 
 2. **Asynchronous UDP Gossip Engine:**
-   * **Broadcaster:** Every 500ms, [`gossip.Engine`](file:///home/dj/Drive2/aegis/pkg/gossip/gossip.go#L14) takes a snapshot of active window counters, serializes them to Protobuf [`GossipPayload`](file:///home/dj/Drive2/aegis/api/proto/state.proto#L12), and sends UDP datagrams to configured peers.
+   * **Broadcaster:** Every 500ms, [`gossip.Engine`](file:///home/dj/Drive2/aegis/pkg/gossip/gossip.go#L14) snapshots active non-stale window counters, serializes them to Protobuf [`GossipPayload`](file:///home/dj/Drive2/aegis/api/proto/state.proto#L12), and sends UDP datagrams to configured peers.
    * **Listener:** Inbound UDP datagrams on `GossipPort` are decoded from Protobuf and merged into local state using the commutative max rule:
      $\text{local}[i] = \max(\text{local}[i], \text{remote}[i])$.
 
@@ -168,23 +177,21 @@ flowchart TD
 
     Client["HTTP Client Request"]:::dark
     Resp429["HTTP 429 Too Many Requests"]:::dark
+    Resp503["HTTP 503 Service Unavailable"]:::dark
     Upstream["Upstream Backend API"]:::dark
 
     subgraph AegisNode["Aegis Node Internals"]
         direction TB
 
-        subgraph CriticalPath["1. Critical Path (Synchronous, Sub-Millisecond)"]
-            ProxyHandler["Reverse Proxy Handler (httputil)"]:::innerDark
-            KeyExtractor["Dynamic Key Extractor (API Key, Auth, Forwarded IP, RemoteAddr)"]:::innerDark
+        subgraph ShieldPipeline["1. Protection Shield Pipeline (pkg/shield)"]
+            Extract["Extract Identifier (API Key, Auth, IP)"]:::innerDark
             
-            subgraph CRDTEngine["CRDT Engine (pkg/crdt)"]
-                LimiterAllow["Limiter.Allow()"]:::innerDark
-                SlidingWindow["Sliding Window Estimator: (PrevBucket * Overlap%) + CurrBucket"]:::innerDark
-                RWMutex["sync.RWMutex"]:::innerDark
-                Buckets[("Time-Bucketed G-Counters")]:::innerDark
+            subgraph ChainGuard["Guard Engine (pkg/shield)"]
+                RateGuard["RateLimitGuard (crdt.Limiter)"]:::innerDark
+                VegasGuard["AdaptiveConcurrencyGuard (TCP Vegas)"]:::innerDark
             end
 
-            Decision{"EstimatedCount < Limit?"}:::highlight
+            Decision{"Allowed?"}:::highlight
         end
 
         subgraph BackgroundPath["2. Gossip Engine (pkg/gossip) (Asynchronous, Background UDP)"]
@@ -205,19 +212,17 @@ flowchart TD
         end
     end
 
-    Client -->|"HTTP Request"| ProxyHandler
-    ProxyHandler --> KeyExtractor
-    KeyExtractor -->|"Key + Limit"| LimiterAllow
-    LimiterAllow --> RWMutex
-    RWMutex --> SlidingWindow
-    SlidingWindow --> Buckets
-    SlidingWindow --> Decision
-    Decision -->|"No (Limit Exceeded)"| Resp429
-    Decision -->|"Yes (Increment Local Node Count)"| ProxyHandler
-    ProxyHandler -->|"Forward Request"| Upstream
+    Client -->|"HTTP Request"| Extract
+    Extract --> RateGuard
+    RateGuard --> VegasGuard
+    VegasGuard --> Decision
+    Decision -->|"Rate Limit Exceeded"| Resp429
+    Decision -->|"Concurrency Saturated"| Resp503
+    Decision -->|"Yes (Increment In-Flight & Local Count)"| Upstream
+
+    Upstream -.->|"Response RTT Latency"| VegasGuard
 
     Ticker -->|"Every 500ms"| SnapShot
-    Buckets -.->|"Read Active Buckets"| SnapShot
     SnapShot --> ProtoEncode
     ProtoEncode --> UDPSend
     UDPSend -->|"UDP Datagram"| RemotePeers["Remote Aegis Peer Nodes"]:::dark
@@ -225,12 +230,11 @@ flowchart TD
     RemotePeers -->|"UDP Datagram"| UDPListen
     UDPListen --> ProtoDecode
     ProtoDecode --> MergeLogic
-    MergeLogic -.->|"Monotonic State Merge"| Buckets
 
     style AegisNode fill:#09090b,stroke:#ffffff,stroke-width:1.5px,color:#ffffff
-    style CriticalPath fill:#18181b,stroke:#ffffff,stroke-width:1px,color:#ffffff
+    style ShieldPipeline fill:#18181b,stroke:#ffffff,stroke-width:1px,color:#ffffff
+    style ChainGuard fill:#21262d,stroke:#ffffff,stroke-width:1px,color:#ffffff
     style BackgroundPath fill:#18181b,stroke:#ffffff,stroke-width:1px,color:#ffffff
-    style CRDTEngine fill:#27272a,stroke:#ffffff,stroke-width:1px,color:#ffffff
     style OutboundBroadcast fill:#27272a,stroke:#ffffff,stroke-width:1px,color:#ffffff
     style InboundListen fill:#27272a,stroke:#ffffff,stroke-width:1px,color:#ffffff
     linkStyle default stroke:#ffffff,stroke-width:1.5px,color:#ffffff
@@ -245,13 +249,13 @@ The following milestones have been completed:
 
 - [x] Project scaffolding, YAML config loader, and entrypoint ([`cmd/proxy`](file:///home/dj/Drive2/aegis/cmd/proxy/main.go))
 - [x] Protobuf schema for G-Counter vector clocks and gossip payloads ([`api/proto/state.proto`](file:///home/dj/Drive2/aegis/api/proto/state.proto))
-- [x] Thread-safe G-Counter and Sliding Window rate limiter ([`pkg/crdt`](file:///home/dj/Drive2/aegis/pkg/crdt))
+- [x] Thread-safe G-Counter and Sliding Window rate limiter with memory eviction ([`pkg/crdt`](file:///home/dj/Drive2/aegis/pkg/crdt))
 - [x] UDP gossip protocol for peer state synchronization ([`pkg/gossip`](file:///home/dj/Drive2/aegis/pkg/gossip))
-- [x] Reverse proxy with HTTP 429 enforcement ([`cmd/proxy`](file:///home/dj/Drive2/aegis/cmd/proxy/main.go))
+- [x] Universal Guard pattern, TCP Vegas adaptive concurrency, and 429/503 enforcement ([`pkg/shield`](file:///home/dj/Drive2/aegis/pkg/shield))
+- [x] Automated unit and race detection test suites (`make test`)
 
 Currently working towards:
 
-- [ ] Resolving bare-metal audit items (unit test suite, memory eviction, graceful shutdown)
 - [ ] Phase 2: Containerization (Distroless Dockerfile, multi-node `docker-compose.yaml`)
 - [ ] Phase 3: Chaos Testing (Toxiproxy partition tests, Vegeta latency benchmarks)
 - [ ] Phase 4: Cloud-Native Delivery (Kubernetes manifests, Helm chart)

@@ -1,30 +1,33 @@
 # GEMINI.md - Aegis Development Guide & Agent Instructions
 
 ## 1. Project Overview
-**Aegis** is a high-performance, decentralized distributed rate limiter built in Go[cite: 1]. It eliminates centralized databases (such as Redis) from the critical path of API gateways by pairing Conflict-free Replicated Data Types (CRDTs) with an asynchronous background UDP gossip protocol[cite: 1].
+**Aegis** is a high-performance, decentralized distributed rate limiter and load shedding proxy built in Go.
+It eliminates centralized databases (such as Redis) from the critical path of API gateways by pairing Conflict-free Replicated Data Types (CRDTs) with an asynchronous background UDP gossip protocol and local TCP Vegas adaptive concurrency limiting.
 
-* **Core Goal:** Sub-millisecond, in-memory rate-limit evaluation with eventual consistency across distributed nodes[cite: 1].
-* **Primary Language:** Go (Golang)[cite: 1]
-* **Serialization:** Protocol Buffers (Protobuf)[cite: 1]
-* **Transport:** UDP for peer gossip[cite: 1], HTTP for reverse proxy routing.
-* **Testing & Verification:** Chaos testing via Toxiproxy and throughput benchmarking via Vegeta[cite: 1].
+* **Core Goal:** Sub-millisecond, in-memory rate-limit evaluation and adaptive load shedding with eventual consistency across distributed nodes.
+* **Primary Language:** Go (Golang)
+* **Serialization:** Protocol Buffers (Protobuf)
+* **Transport:** UDP for peer gossip, HTTP for reverse proxy routing.
+* **Testing & Verification:** Chaos testing via Toxiproxy and throughput benchmarking via Vegeta.
 
 ---
 
 ## 2. Architecture & Algorithms
 
-### Rate Limiting Algorithm
-* **Phase 1 Implementation:** Sliding Window Counter.
-* **CRDT Model:** Time-Bucketed Grow-Only Counters (Map of G-Counters by time window)[cite: 1].
+### Rate Limiting & Concurrency Control
+* **Velocity Rate Limiting:** Sliding Window Counter built on time-bucketed Grow-Only Counters (G-Counters).
 * **State Convergence:** The CRDT merge function must be idempotent, commutative, and monotonic:
   $$\text{Merged}[i] = \max(\text{Local}[i], \text{Remote}[i])$$
+* **Adaptive Concurrency Limiting (Load Shedding):** Local TCP Vegas gradient queue-delay algorithm:
+  $$\text{QueueSize} = \text{Limit} \times \left(1 - \frac{RTT_{\min}}{RTT_{\text{curr}}}\right)$$
+* **Modular Protection Modes:** Configurable via `Protection.Mode` as `RateLimitOnly` (429), `ConcurrencyOnly` (503), or `Strict` (both).
 
 ### Dynamic Key Extraction Hierarchy
 To avoid the Shared IP / NAT problem, extract request identifiers in the following strict order:
 1. `X-API-Key` header
 2. `Authorization` header (Bearer Token / JWT)
-3. `X-Forwarded-For` / `CF-Connecting-IP` (First IP in comma-separated list)
-4. Fallback: Raw `http.Request.RemoteAddr`
+3. `CF-Connecting-IP` / `X-Forwarded-For` (First IP in comma-separated list)
+4. Fallback: Raw `http.Request.RemoteAddr` (parsed via `net.SplitHostPort` for IPv4 & IPv6)
 
 ---
 
@@ -37,10 +40,10 @@ aegis/
 ├── cmd/
 │   └── proxy/          # Application entrypoint (main.go), lifecycle management, and signal trapping
 ├── pkg/
-│   ├── config/         # Configuration schema, YAML loader, and environment variable bindings
-│   ├── crdt/           # G-Counter and Sliding Window implementation (thread-safe, sync.RWMutex)
-│   ├── gossip/         # UDP listener, periodic broadcaster, peer discovery, and state merging
-│   └── proxy/          # httputil.ReverseProxy handler, middleware, and 429 response enforcement
+│   ├── config/         # Configuration schema, YAML loader, and validation (pkg/config)
+│   ├── crdt/           # G-Counter and Sliding Window implementation with eviction (pkg/crdt)
+│   ├── gossip/         # UDP listener, periodic broadcaster, peer discovery, and state merging (pkg/gossip)
+│   └── shield/         # Guard interface, TCP Vegas adaptive concurrency, and middleware (pkg/shield)
 ├── config.yaml         # Default runtime configuration
 ├── go.mod              # Go module definition
 ├── go.sum              # Go checksums
@@ -82,9 +85,11 @@ protoc --go_out=. --go_opt=paths=source_relative api/proto/state.proto
 go test -v -race ./pkg/...
 ```
 
-### Local Bare-Metal Execution
+### Local Execution via Makefile
 ```bash
-go run cmd/proxy/main.go
+make test
+make build
+make run
 ```
 
 ### Cross-Compilation (Bare-Metal Binaries)
@@ -100,14 +105,14 @@ GOOS=darwin GOARCH=arm64 go build -o bin/aegis-darwin-arm64 cmd/proxy/main.go
 
 ## 6. Phased Roadmap
 
-- [x] **Phase 1A: Setup & Config** — Project scaffolding, YAML parser (`pkg/config`), and baseline CLI flags.
+- [x] **Phase 1A: Setup & Config** - Project scaffolding, YAML parser, validation, and CLI flags (`pkg/config`).
 - [x] **Phase 1B: Protobuf Schema** - Define `state.proto` with G-Counter vector clocks and compile Go stubs.
-- [x] **Phase 1C: CRDT Engine** - Thread-safe G-Counter and Sliding Window logic with unit tests (`pkg/crdt`).
-- [x] **Phase 1D: UDP Gossip** — Outbound broadcast ticker and inbound UDP listener with state merging (`pkg/gossip`).
-- [x] **Phase 1E: Reverse Proxy** — `httputil.ReverseProxy` integration, middleware, and `HTTP 429` enforcement (`cmd/proxy`).
-- [ ] **Phase 2: Containerization** — Multi-stage distroless `Dockerfile` and local multi-node `docker-compose.yaml`.
-- [ ] **Phase 3: Chaos & Benchmarking** — Toxiproxy partition tests and Vegeta latency reports ($p_{50}, p_{99}$).
-- [ ] **Phase 4: Cloud-Native Delivery** — Kubernetes manifests (Sidecar & Gateway modes) and Helm chart packaging.
+- [x] **Phase 1C: CRDT Engine** - Thread-safe G-Counter, Sliding Window, memory eviction, and race tests (`pkg/crdt`).
+- [x] **Phase 1D: UDP Gossip** - Outbound broadcast ticker and inbound UDP listener with state merging (`pkg/gossip`).
+- [x] **Phase 1E: Protection Shield** - Universal Guard pattern, TCP Vegas adaptive concurrency, and 429/503 middleware (`pkg/shield`).
+- [ ] **Phase 2: Containerization** - Multi-stage distroless `Dockerfile` and local multi-node `docker-compose.yaml`.
+- [ ] **Phase 3: Chaos & Benchmarking** - Toxiproxy partition tests and Vegeta latency reports ($p_{50}, p_{99}$).
+- [ ] **Phase 4: Cloud-Native Delivery** - Kubernetes manifests (Sidecar & Gateway modes) and Helm chart packaging.
 
 ---
 
