@@ -2,12 +2,11 @@
 BINARY_NAME=aegis
 PROXY_CMD=cmd/proxy/main.go
 
-.PHONY: all deps proto build run clean
+.PHONY: all deps proto build test run clean
 
 # The default target if you just type 'make'
 all: run
 
-# 1. Install dependencies and the Go protoc plugin
 # 1. Install dependencies and the Go protoc plugin
 deps:
 	go mod tidy
@@ -23,12 +22,17 @@ build: proto
 	@echo "Compiling the Aegis binary..."
 	go build -o bin/$(BINARY_NAME) $(PROXY_CMD)
 
-# 4. Run the proxy (Depends on 'build' running first)
+# 4. Run automated tests with race detector
+test: proto
+	@echo "Running tests with race detection..."
+	go test -v -race ./pkg/...
+
+# 5. Run the proxy (Depends on 'build' running first)
 run: build
 	@echo "Starting Aegis..."
 	./bin/$(BINARY_NAME)
 
-# 5. Clean up generated files and binaries
+# 6. Clean up generated files and binaries
 clean:
 	@echo "Cleaning up workspace..."
 	rm -rf bin/
