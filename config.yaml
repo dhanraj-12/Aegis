@@ -3,6 +3,20 @@ GossipPort: 8081
 Peers: 
   - "127.0.0.1:9000"
   - "127.0.0.1:9001"
+BackendURL: "https://httpbin.org"
 
-AuthRateLimit: 100
-IPRateLimit: 10
+Protection:
+  Mode: "Strict"
+
+  RateLimit:
+    Window: "1m"
+    AuthRateLimit: 100
+    IPRateLimit: 10
+
+  Concurrency:
+    MaxInFlight: 200
+    MinInFlight: 10
+    InitialLimit: 50
+    Alpha: 3.0
+    Beta: 6.0
+    WindowSize: "10s"
