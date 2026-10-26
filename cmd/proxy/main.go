@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -55,8 +56,20 @@ func main() {
 	guard := shield.BuildGuard(cfg, rateLimiter)
 	defer guard.Close()
 
-	// 4. Initialize reverse proxy
+	// 4. Initialize reverse proxy with high-concurrency connection pooling
 	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+	proxy.Transport = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          2000,
+		MaxIdleConnsPerHost:   1000,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
 
 	// 5. Mount protection middleware
 	http.Handle("/", shield.ProtectionMiddleware(guard, cfg, proxy, backendURL.Host))

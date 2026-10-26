@@ -91,7 +91,6 @@ func ProtectionMiddleware(guard Guard, cfg *config.Config, next http.Handler, ta
 			r.Host = targetHost
 		}
 
-		log.Printf("[ALLOW] %s forwarded", identifier)
 		next.ServeHTTP(recorder, r)
 	}
 }
