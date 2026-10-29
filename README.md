@@ -149,96 +149,157 @@ flowchart TD
 
 ### 3. Aegis Low-Level Design (LLD)
 
-Internally, an Aegis node executes a unified protection pipeline orchestrated by [`pkg/shield`](file:///home/dj/Drive2/aegis/pkg/shield):
+This section provides a complete reference for every package, struct, interface, function, and execution flow in Aegis.
+It is intended to help contributors and reviewers understand the codebase in depth.
 
-1. **Synchronous Request Processing:**
-   * Inbound HTTP requests pass through [`ProtectionMiddleware`](file:///home/dj/Drive2/aegis/pkg/shield/middleware.go#L62).
-   * Identifier and limit are extracted using the 4-tier hierarchy:
-     `X-API-Key` -> `Authorization: Bearer` -> `CF-Connecting-IP` / `X-Forwarded-For` -> `net.SplitHostPort(RemoteAddr)`.
-   * [`Guard.Acquire`](file:///home/dj/Drive2/aegis/pkg/shield/shield.go#L20) evaluates protection rules based on configured `Protection.Mode`:
-     * **Rate Limiting:** Checks sliding window counter across time buckets via [`crdt.Limiter`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go).
-       Rejects with `HTTP 429 Too Many Requests` if velocity threshold is exceeded.
-     * **Concurrency Limiting:** Checks active in-flight count against the dynamic limit via [`AdaptiveConcurrencyGuard`](file:///home/dj/Drive2/aegis/pkg/shield/concurrency.go).
-       Rejects with `HTTP 503 Service Unavailable` if concurrency ceiling is reached.
-   * If permitted, the request is forwarded to the upstream backend.
-   * The deferred `DoneFunc` records response status and elapsed round-trip latency (RTT) to dynamically adjust Vegas limits.
+#### 3.1. End-to-End Function Call Graphs
 
-2. **Asynchronous UDP Gossip Engine:**
-   * **Broadcaster:** Every 500ms, [`gossip.Engine`](file:///home/dj/Drive2/aegis/pkg/gossip/gossip.go#L14) snapshots active non-stale window counters, serializes them to Protobuf [`GossipPayload`](file:///home/dj/Drive2/aegis/api/proto/state.proto#L12), and sends UDP datagrams to configured peers.
-   * **Listener:** Inbound UDP datagrams on `GossipPort` are decoded from Protobuf and merged into local state using the commutative max rule:
-     $\text{local}[i] = \max(\text{local}[i], \text{remote}[i])$.
-
+##### Call Graph 1: Inbound HTTP Request Evaluation & Concurrency Control
 ```mermaid
-%%{init: {'theme': 'dark', 'themeVariables': { 'darkMode': true, 'background': '#09090b', 'mainBkg': '#18181b', 'primaryColor': '#18181b', 'primaryBorderColor': '#ffffff', 'primaryTextColor': '#ffffff', 'lineColor': '#ffffff', 'textColor': '#ffffff', 'nodeBorder': '#ffffff', 'clusterBkg': '#09090b', 'clusterBorder': '#ffffff', 'edgeLabelBackground': '#18181b' }}}%%
-flowchart TD
-    classDef dark fill:#18181b,stroke:#ffffff,stroke-width:1.5px,color:#ffffff;
-    classDef innerDark fill:#27272a,stroke:#ffffff,stroke-width:1.5px,color:#ffffff;
-    classDef highlight fill:#3f3f46,stroke:#ffffff,stroke-width:2px,color:#ffffff;
+sequenceDiagram
+    autonumber
+    actor Client as "HTTP Client"
+    participant MW as "ProtectionMiddleware"
+    participant Ext as "ExtractIdentifier"
+    participant Guard as "ChainGuard / Guard"
+    participant Rate as "RateLimitGuard"
+    participant Limiter as "crdt.Limiter"
+    participant Vegas as "AdaptiveConcurrencyGuard"
+    participant Upstream as "ReverseProxy / Upstream"
 
-    Client["HTTP Client Request"]:::dark
-    Resp429["HTTP 429 Too Many Requests"]:::dark
-    Resp503["HTTP 503 Service Unavailable"]:::dark
-    Upstream["Upstream Backend API"]:::dark
+    Client->>MW: "HTTP Request (Headers, Body)"
+    MW->>Ext: "ExtractIdentifier(r, cfg)"
+    Ext-->>MW: "identifier, limit"
 
-    subgraph AegisNode["Aegis Node Internals"]
-        direction TB
-
-        subgraph ShieldPipeline["1. Protection Shield Pipeline (pkg/shield)"]
-            Extract["Extract Identifier (API Key, Auth, IP)"]:::innerDark
-            
-            subgraph ChainGuard["Guard Engine (pkg/shield)"]
-                RateGuard["RateLimitGuard (crdt.Limiter)"]:::innerDark
-                VegasGuard["AdaptiveConcurrencyGuard (TCP Vegas)"]:::innerDark
-            end
-
-            Decision{"Allowed?"}:::highlight
-        end
-
-        subgraph BackgroundPath["2. Gossip Engine (pkg/gossip) (Asynchronous, Background UDP)"]
-            direction TB
-
-            subgraph OutboundBroadcast["Outbound Broadcaster"]
-                Ticker["Ticker (500ms)"]:::innerDark
-                SnapShot["Limiter.SnapShot() (Active Windows)"]:::innerDark
-                ProtoEncode["Protobuf Marshal (GossipPayload)"]:::innerDark
-                UDPSend["UDP Socket Broadcast"]:::innerDark
-            end
-
-            subgraph InboundListen["Inbound Listener"]
-                UDPListen["UDP Listener (:GossipPort)"]:::innerDark
-                ProtoDecode["Protobuf Unmarshal"]:::innerDark
-                MergeLogic["Limiter.MergeState: max(local, remote)"]:::innerDark
-            end
+    MW->>Guard: "Acquire(ctx, identifier, limit)"
+    alt "Mode: Strict / RateLimitOnly"
+        Guard->>Rate: "Acquire(ctx, identifier, limit)"
+        Rate->>Limiter: "Allow(identifier, limit)"
+        alt "Velocity >= Limit"
+            Limiter-->>Rate: "false"
+            Rate-->>Guard: "Decision{Allowed: false, StatusCode: 429}"
+            Guard-->>MW: "Decision{Allowed: false, StatusCode: 429}"
+            MW-->>Client: "HTTP 429 Too Many Requests"
+        else "Velocity < Limit"
+            Limiter-->>Rate: "true"
+            Rate-->>Guard: "Decision{Allowed: true}"
         end
     end
 
-    Client -->|"HTTP Request"| Extract
-    Extract --> RateGuard
-    RateGuard --> VegasGuard
-    VegasGuard --> Decision
-    Decision -->|"Rate Limit Exceeded"| Resp429
-    Decision -->|"Concurrency Saturated"| Resp503
-    Decision -->|"Yes (Increment In-Flight & Local Count)"| Upstream
+    alt "Mode: Strict / ConcurrencyOnly"
+        Guard->>Vegas: "Acquire(ctx, identifier, limit)"
+        alt "inFlight > currentLimit"
+            Vegas-->>Guard: "Decision{Allowed: false, StatusCode: 503}"
+            Guard-->>MW: "Decision{Allowed: false, StatusCode: 503}"
+            MW-->>Client: "HTTP 503 Service Unavailable"
+        else "inFlight <= currentLimit"
+            Vegas-->>Guard: "Decision{Allowed: true}, DoneFunc"
+            Guard-->>MW: "Decision{Allowed: true}, Combined DoneFunc"
+        end
+    end
 
-    Upstream -.->|"Response RTT Latency"| VegasGuard
+    MW->>Upstream: "ReverseProxy.ServeHTTP(recorder, r)"
+    Upstream-->>MW: "Response (Status, Body)"
+    MW-->>Client: "Response (Status, Body)"
+    Note over MW,Vegas: "defer DoneFunc(statusCode, elapsedRTT)"
+    MW->>Vegas: "DoneFunc: inFlight.Add(-1), updateVegas(latency)"
+```
 
-    Ticker -->|"Every 500ms"| SnapShot
-    SnapShot --> ProtoEncode
-    ProtoEncode --> UDPSend
-    UDPSend -->|"UDP Datagram"| RemotePeers["Remote Aegis Peer Nodes"]:::dark
+##### Call Graph 2: Background UDP Gossip Broadcast & State Ingestion
+```mermaid
+flowchart TD
+    classDef dark fill:#18181b,stroke:#ffffff,stroke-width:1.5px,color:#ffffff;
+    classDef inner fill:#27272a,stroke:#ffffff,stroke-width:1.5px,color:#ffffff;
 
-    RemotePeers -->|"UDP Datagram"| UDPListen
-    UDPListen --> ProtoDecode
-    ProtoDecode --> MergeLogic
+    subgraph Outbound["Outbound Broadcaster (Every 500ms)"]
+        direction TB
+        Ticker["ticker.C (500ms)"]:::inner --> Snap["Limiter.SnapShot()"]:::inner
+        Snap --> Proto["Protobuf Marshal (GossipPayload)"]:::inner
+        Proto --> Send["conn.WriteToUDP(data, peerAddr)"]:::inner
+    end
 
-    style AegisNode fill:#09090b,stroke:#ffffff,stroke-width:1.5px,color:#ffffff
-    style ShieldPipeline fill:#18181b,stroke:#ffffff,stroke-width:1px,color:#ffffff
-    style ChainGuard fill:#21262d,stroke:#ffffff,stroke-width:1px,color:#ffffff
-    style BackgroundPath fill:#18181b,stroke:#ffffff,stroke-width:1px,color:#ffffff
-    style OutboundBroadcast fill:#27272a,stroke:#ffffff,stroke-width:1px,color:#ffffff
-    style InboundListen fill:#27272a,stroke:#ffffff,stroke-width:1px,color:#ffffff
+    subgraph Inbound["Inbound Receiver (:GossipPort)"]
+        direction TB
+        Recv["conn.ReadFromUDP(buffer)"]:::inner --> Unmarshal["Protobuf Unmarshal"]:::inner
+        Unmarshal --> Filter{"SenderId == localnode?"}:::dark
+        Filter -- "No" --> Merge["Limiter.MergeState()"]:::inner
+        Merge --> GMerge["GCounter.Merge(): max(local, remote)"]:::inner
+        Filter -- "Yes" --> Drop["Discard self-broadcast"]:::inner
+    end
+
+    Send -->|"UDP Datagram"| RemotePeers["Remote Aegis Nodes"]:::dark
+    RemotePeers -->|"UDP Datagram"| Recv
+
+    style Outbound fill:#09090b,stroke:#ffffff,stroke-width:1.5px,color:#ffffff
+    style Inbound fill:#09090b,stroke:#ffffff,stroke-width:1.5px,color:#ffffff
     linkStyle default stroke:#ffffff,stroke-width:1.5px,color:#ffffff
 ```
+
+---
+
+#### 3.2. Detailed Package Reference
+
+##### 1. Package [`pkg/config`](file:///home/dj/Drive2/aegis/pkg/config/config.go)
+* **[`Config`](file:///home/dj/Drive2/aegis/pkg/config/config.go#L13):** Root struct holding `ProxyPort`, `GossipPort`, `Peers`, `BackendURL`, and `ProtectionConfig`.
+* **[`ProtectionConfig`](file:///home/dj/Drive2/aegis/pkg/config/config.go#L25):** Controls mode (`"RateLimitOnly"`, `"ConcurrencyOnly"`, or `"Strict"`) and embeds rate/concurrency configs.
+* **[`RateLimitConfig`](file:///home/dj/Drive2/aegis/pkg/config/config.go#L32):** Holds `Window` duration string, `AuthRateLimit`, and `IPRateLimit`.
+* **[`ConcurrencyConfig`](file:///home/dj/Drive2/aegis/pkg/config/config.go#L38):** Holds `MinInFlight`, `InitialLimit`, `MaxInFlight`, `Alpha`, `Beta`, and `WindowSize`.
+* **[`LoadConfig(path)`](file:///home/dj/Drive2/aegis/pkg/config/config.go#L142):** Reads and parses the YAML file from disk, calling `Validate()`.
+* **[`(*Config).Validate()`](file:///home/dj/Drive2/aegis/pkg/config/config.go#L48):** Validates port numbers, URL formatting, duration parsing, and boundary relations (`MinInFlight <= InitialLimit <= MaxInFlight` and `Alpha < Beta`).
+
+##### 2. Package [`pkg/crdt`](file:///home/dj/Drive2/aegis/pkg/crdt)
+* **[`GCounter`](file:///home/dj/Drive2/aegis/pkg/crdt/gcounter.go#L6):** Thread-safe Grow-Only Counter CRDT.
+  * [`Increment(nodeID)`](file:///home/dj/Drive2/aegis/pkg/crdt/gcounter.go#L20): Atomically increments local count under a write lock.
+  * [`Value()`](file:///home/dj/Drive2/aegis/pkg/crdt/gcounter.go#L28): Calculates the sum of counts across all nodes under a read lock.
+  * [`Merge(remoteCounts)`](file:///home/dj/Drive2/aegis/pkg/crdt/gcounter.go#L40): Applies the CRDT join-semilattice merge: $\text{local}[i] = \max(\text{local}[i], \text{remote}[i])$.
+  * [`State()`](file:///home/dj/Drive2/aegis/pkg/crdt/gcounter.go#L53): Returns a thread-safe deep copy of the vector clock for gossip broadcast.
+* **[`Limiter`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go#L11):** Sliding window rate limiter engine.
+  * [`NewLimiter(localNode, windowSize)`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go#L21): Initializes the state map and starts the background janitor loop.
+  * [`Allow(identifier, limit)`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go#L115): Implements the sliding window formula:
+    $\text{EstimatedCount} = (\text{PreviousCounts} \times \text{Overlap}) + \text{CurrentCounts}$.
+    Returns `true` and increments local counter if within limit, or `false` if exceeded.
+  * [`SnapShot()`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go#L151): Returns a deep copy of active, non-stale buckets for UDP transmission.
+  * [`MergeState(remoteState)`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go#L169): Merges remote vector clocks into local bucket state.
+  * [`EvictStale()`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go#L73): Deletes buckets older than $2 \times \text{windowSize}$ to prevent memory leaks.
+  * [`Close()`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go#L107): Terminates the background cleanup janitor cleanly.
+
+##### 3. Package [`pkg/gossip`](file:///home/dj/Drive2/aegis/pkg/gossip)
+* **[`Engine`](file:///home/dj/Drive2/aegis/pkg/gossip/gossip.go#L14):** Asynchronous UDP gossip synchronization engine.
+  * [`NewEngine(limiter, localnode, cfg)`](file:///home/dj/Drive2/aegis/pkg/gossip/gossip.go#L21): Creates a new gossip engine instance.
+  * [`Start()`](file:///home/dj/Drive2/aegis/pkg/gossip/gossip.go#L29): Spawns the background listener and broadcaster goroutines.
+  * [`listenUDP()`](file:///home/dj/Drive2/aegis/pkg/gossip/gossip.go#L34): Listens on `GossipPort` with a safe 1400-byte MTU buffer, unmarshals Protobuf messages, filters self-broadcast loops, and merges remote states into the limiter.
+  * [`broadcastUDP()`](file:///home/dj/Drive2/aegis/pkg/gossip/gossip.go#L85): Ticks every 500ms, snapshots non-stale buckets, serializes to Protobuf [`GossipPayload`](file:///home/dj/Drive2/aegis/api/proto/state.proto#L12), and sends UDP datagrams to all peers.
+
+##### 4. Package [`pkg/shield`](file:///home/dj/Drive2/aegis/pkg/shield)
+* **[`Guard`](file:///home/dj/Drive2/aegis/pkg/shield/shield.go#L18):** Universal interface for protection strategies:
+  `Acquire(ctx, identifier, limit) (Decision, DoneFunc)`.
+* **[`Decision`](file:///home/dj/Drive2/aegis/pkg/shield/shield.go#L9):** Struct containing `Allowed`, `StatusCode` (429 or 503), and `Reason`.
+* **[`DoneFunc`](file:///home/dj/Drive2/aegis/pkg/shield/shield.go#L16):** Callback invoked when an HTTP request completes: `func(statusCode int, latency time.Duration)`.
+* **[`RateLimitGuard`](file:///home/dj/Drive2/aegis/pkg/shield/ratelimit.go#L12):** Wraps [`crdt.Limiter`](file:///home/dj/Drive2/aegis/pkg/crdt/limiter.go) to reject excess velocity with `HTTP 429`.
+* **[`AdaptiveConcurrencyGuard`](file:///home/dj/Drive2/aegis/pkg/shield/concurrency.go#L12):** Implements local TCP Vegas gradient load shedding:
+  * Tracks in-flight requests atomically via `inFlight atomic.Int64`.
+  * Computes queue backlog: $\text{QueueSize} = \text{CurrentLimit} \times (1 - RTT_{\min} / RTT_{\text{curr}})$.
+  * Adjusts limit between `minLimit` and `maxLimit` based on $\alpha$ and $\beta$ thresholds.
+  * Ignores upstream 5xx errors to prevent artificial limit collapse during backend errors.
+  * Periodically resets $RTT_{\min}$ to prevent stale baseline poisoning.
+* **[`ChainGuard`](file:///home/dj/Drive2/aegis/pkg/shield/composite.go#L12):** Combines multiple guards sequentially with automatic rollback if a downstream guard rejects.
+* **[`BuildGuard(cfg, rateLimiter)`](file:///home/dj/Drive2/aegis/pkg/shield/composite.go#L53):** Factory function creating the appropriate Guard hierarchy based on `Protection.Mode`.
+* **[`ExtractIdentifier(r, cfg)`](file:///home/dj/Drive2/aegis/pkg/shield/middleware.go#L19):** Resolves client identity in strict precedence order:
+  1. `X-API-Key`
+  2. `Authorization: Bearer`
+  3. `CF-Connecting-IP` / `X-Forwarded-For` (first IP)
+  4. Raw `r.RemoteAddr` (parsed via `net.SplitHostPort` for IPv4 and IPv6)
+* **[`ProtectionMiddleware(...)`](file:///home/dj/Drive2/aegis/pkg/shield/middleware.go#L69):** HTTP middleware intercepting requests, evaluating guards, proxying traffic, and recording metrics.
+
+##### 5. Package [`cmd/proxy`](file:///home/dj/Drive2/aegis/cmd/proxy/main.go)
+* **[`main()`](file:///home/dj/Drive2/aegis/cmd/proxy/main.go#L22):** Boots the application:
+  1. Loads configuration.
+  2. Parses backend upstream URL.
+  3. Initializes CRDT limiter and starts UDP gossip engine.
+  4. Builds unified Guard hierarchy.
+  5. Configures reverse proxy with high-concurrency connection pooling (`MaxIdleConns: 2000`, `MaxIdleConnsPerHost: 1000`).
+  6. Mounts protection middleware.
+  7. Traps `SIGINT`/`SIGTERM` for graceful server drain and shutdown.
 
 ---
 
