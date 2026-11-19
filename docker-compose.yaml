@@ -1,0 +1,82 @@
+services:
+  # Upstream Dummy Go Backend Service
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: aegis-backend:latest
+    container_name: aegis-backend
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  # Real Centralized Redis (for traditional comparison)
+  redis:
+    image: redis:alpine
+    container_name: aegis-redis
+    expose:
+      - "6379"
+    restart: unless-stopped
+
+  # Traditional Centralized Proxy (evaluates rate limits synchronously via Redis)
+  traditional-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.traditional
+    image: aegis-traditional-proxy:latest
+    container_name: traditional-proxy
+    ports:
+      - "5010:5010"
+    command: ["-port", "5010", "-backend", "http://backend:5000", "-redis-addr", "redis:6379", "-limit", "500000"]
+    depends_on:
+      - backend
+      - redis
+    restart: unless-stopped
+
+  # Aegis Distributed Cluster Node 1
+  aegis-node1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aegis:latest
+    container_name: aegis-node1
+    ports:
+      - "5031:5031"
+      - "5131:5131/udp"
+    volumes:
+      - ./test/cluster/docker-node1.yaml:/etc/aegis/config.yaml:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Aegis Distributed Cluster Node 2
+  aegis-node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aegis:latest
+    container_name: aegis-node2
+    ports:
+      - "5032:5032"
+      - "5132:5132/udp"
+    volumes:
+      - ./test/cluster/docker-node2.yaml:/etc/aegis/config.yaml:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Aegis Distributed Cluster Node 3
+  aegis-node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aegis:latest
+    container_name: aegis-node3
+    ports:
+      - "5033:5033"
+      - "5133:5133/udp"
+    volumes:
+      - ./test/cluster/docker-node3.yaml:/etc/aegis/config.yaml:ro
+    depends_on:
+      - backend
+    restart: unless-stopped

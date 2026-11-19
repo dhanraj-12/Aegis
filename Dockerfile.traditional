@@ -1,0 +1,14 @@
+# Stage 1: Build the Traditional Redis Proxy
+FROM golang:1.24-alpine AS builder
+WORKDIR /src
+COPY test/traditional_proxy/main.go ./
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/traditional_proxy main.go
+
+# Stage 2: Distroless runtime
+FROM gcr.io/distroless/static-debian12:nonroot
+WORKDIR /
+COPY --from=builder /bin/traditional_proxy /traditional_proxy
+EXPOSE 5010
+USER nonroot:nonroot
+ENTRYPOINT ["/traditional_proxy"]
+CMD ["-port", "5010", "-backend", "http://backend:5000", "-redis-addr", "redis:6379"]

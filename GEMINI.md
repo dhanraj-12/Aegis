@@ -110,7 +110,7 @@ GOOS=darwin GOARCH=arm64 go build -o bin/aegis-darwin-arm64 cmd/proxy/main.go
 - [x] **Phase 1C: CRDT Engine** - Thread-safe G-Counter, Sliding Window, memory eviction, and race tests (`pkg/crdt`).
 - [x] **Phase 1D: UDP Gossip** - Outbound broadcast ticker and inbound UDP listener with state merging (`pkg/gossip`).
 - [x] **Phase 1E: Protection Shield** - Universal Guard pattern, TCP Vegas adaptive concurrency, and 429/503 middleware (`pkg/shield`).
-- [ ] **Phase 2: Containerization** - Multi-stage distroless `Dockerfile` and local multi-node `docker-compose.yaml`.
+- [x] **Phase 2: Containerization** - Multi-stage distroless `Dockerfile` and local multi-node `docker-compose.yaml`.
 - [ ] **Phase 3: Chaos & Benchmarking** - Toxiproxy partition tests and Vegeta latency reports ($p_{50}, p_{99}$).
 - [ ] **Phase 4: Cloud-Native Delivery** - Kubernetes manifests (Sidecar & Gateway modes) and Helm chart packaging.
 

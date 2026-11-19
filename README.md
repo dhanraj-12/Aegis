@@ -314,10 +314,10 @@ The following milestones have been completed:
 - [x] UDP gossip protocol for peer state synchronization ([`pkg/gossip`](file:///home/dj/Drive2/aegis/pkg/gossip))
 - [x] Universal Guard pattern, TCP Vegas adaptive concurrency, and 429/503 enforcement ([`pkg/shield`](file:///home/dj/Drive2/aegis/pkg/shield))
 - [x] Automated unit and race detection test suites (`make test`)
+- [x] Containerization with multi-stage distroless Dockerfile and local multi-node cluster ([`Dockerfile`](file:///home/dj/Drive2/aegis/Dockerfile), [`docker-compose.yaml`](file:///home/dj/Drive2/aegis/docker-compose.yaml))
 
 Currently working towards:
 
-- [ ] Phase 2: Containerization (Distroless Dockerfile, multi-node `docker-compose.yaml`)
 - [ ] Phase 3: Chaos Testing (Toxiproxy partition tests, Vegeta latency benchmarks)
 - [ ] Phase 4: Cloud-Native Delivery (Kubernetes manifests, Helm chart)
 
