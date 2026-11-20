@@ -42,7 +42,6 @@ func (e *Engine) listenUDP() {
 	log.Printf("[Gossip] Listening for peer state on UDP port %d (%s)", e.cfg.GossipPort, e.localnode)
 
 	buffer := make([]byte, 1400) // Standard safe MTU limit to avoid IP fragmentation
-	var lastLogTime time.Time
 
 	for {
 		n, remoteAddr, err := conn.ReadFromUDP(buffer)
@@ -75,9 +74,13 @@ func (e *Engine) listenUDP() {
 		// Merge the state
 		e.limiter.MergeState(remoteState)
 
-		if len(remoteState) > 0 && time.Since(lastLogTime) >= 1*time.Second {
-			log.Printf("[Gossip] %s received & merged %d bucket(s) from peer %s", e.localnode, len(remoteState), payload.SenderId)
-			lastLogTime = time.Now()
+		if len(remoteState) > 0 {
+			keys := make([]string, 0, len(remoteState))
+			for k := range remoteState {
+				keys = append(keys, k)
+			}
+			log.Printf("[GOSSIP-IN] %s received & merged %d bucket(s) from peer %s (%s) keys=%v - CRDT state converged",
+				e.localnode, len(remoteState), payload.SenderId, remoteAddr.String(), keys)
 		}
 	}
 }
@@ -94,8 +97,6 @@ func (e *Engine) broadcastUDP() {
 	// Broadcast every 500 milliseconds
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
-
-	var lastLogTime time.Time
 
 	for range ticker.C {
 		// Thread-safe deep copy of local memory
@@ -134,9 +135,9 @@ func (e *Engine) broadcastUDP() {
 			conn.WriteToUDP(data, addr)
 		}
 
-		if time.Since(lastLogTime) >= 2*time.Second {
-			log.Printf("[Gossip] %s broadcasting %d bucket(s) to %d peer(s)", e.localnode, len(pbStates), len(e.cfg.Peers))
-			lastLogTime = time.Now()
+		if len(e.cfg.Peers) > 0 {
+			log.Printf("[GOSSIP-OUT] %s broadcasted %d bucket(s) to %d peer(s) %v",
+				e.localnode, len(pbStates), len(e.cfg.Peers), e.cfg.Peers)
 		}
 	}
 }

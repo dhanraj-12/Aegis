@@ -72,7 +72,8 @@ func ProtectionMiddleware(guard Guard, cfg *config.Config, next http.Handler, ta
 		decision, done := guard.Acquire(r.Context(), identifier, limit)
 
 		if !decision.Allowed {
-			log.Printf("[BLOCK] %s rejected: %s (status %d)", identifier, decision.Reason, decision.StatusCode)
+			log.Printf("[BLOCK] %s %s from %s rejected: %s (status %d)",
+				r.Method, r.URL.Path, identifier, decision.Reason, decision.StatusCode)
 			http.Error(w, decision.Reason, decision.StatusCode)
 			return
 		}
@@ -84,7 +85,15 @@ func ProtectionMiddleware(guard Guard, cfg *config.Config, next http.Handler, ta
 		}
 
 		defer func() {
-			done(recorder.statusCode, time.Since(start))
+			latency := time.Since(start)
+			done(recorder.statusCode, latency)
+			if decision.Limit > 0 {
+				log.Printf("[ALLOW] %s %s from %s -> HTTP %d (Count: %d/%d via CRDT in %v)",
+					r.Method, r.URL.Path, identifier, recorder.statusCode, decision.Count, decision.Limit, latency.Round(time.Microsecond))
+			} else {
+				log.Printf("[ALLOW] %s %s from %s -> HTTP %d (%v)",
+					r.Method, r.URL.Path, identifier, recorder.statusCode, latency.Round(time.Microsecond))
+			}
 		}()
 
 		if targetHost != "" {

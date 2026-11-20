@@ -111,8 +111,8 @@ func (l *Limiter) Close() error {
 	return nil
 }
 
-// Allow checks the sliding window and returns true if the request is allowed, or false if rejected.
-func (l *Limiter) Allow(identifier string, limit uint64) bool {
+// CheckAndIncrement checks the sliding window, increments if under limit, and returns allowed status and count.
+func (l *Limiter) CheckAndIncrement(identifier string, limit uint64) (bool, uint64) {
 	now := time.Now()
 
 	// Calculate fixed windows
@@ -131,20 +131,31 @@ func (l *Limiter) Allow(identifier string, limit uint64) bool {
 	timeIntoCurrent := now.Sub(currentWindow).Seconds()
 	totalWindowSecond := l.windowSize.Seconds()
 	overlapPercentage := (totalWindowSecond - timeIntoCurrent) / totalWindowSecond
+	if overlapPercentage < 0 {
+		overlapPercentage = 0
+	} else if overlapPercentage > 1 {
+		overlapPercentage = 1
+	}
 
 	// Get actual values from previous and current windows
 	previousCounts := float64(previousCounter.Value())
 	currentCounts := float64(currentCounter.Value())
 
 	// Estimated count in the current rolling window
-	estimatedCount := (previousCounts * overlapPercentage) + currentCounts
+	estimatedCount := uint64((previousCounts * overlapPercentage) + currentCounts)
 
-	if uint64(estimatedCount) >= limit {
-		return false
+	if estimatedCount >= limit {
+		return false, estimatedCount
 	}
 
 	currentCounter.Increment(l.localNode)
-	return true
+	return true, estimatedCount + 1
+}
+
+// Allow checks the sliding window and returns true if the request is allowed, or false if rejected.
+func (l *Limiter) Allow(identifier string, limit uint64) bool {
+	allowed, _ := l.CheckAndIncrement(identifier, limit)
+	return allowed
 }
 
 // SnapShot returns a thread-safe deep copy of active state for UDP gossip payload.

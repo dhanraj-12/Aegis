@@ -10,6 +10,8 @@ type Decision struct {
 	Allowed    bool
 	StatusCode int    // e.g., 429 for rate limit, 503 for concurrency shed
 	Reason     string
+	Count      uint64 // current CRDT rolling count (if applicable)
+	Limit      uint64 // rate limit evaluated against
 }
 
 // DoneFunc is executed upon HTTP response completion to record latency and release concurrency.

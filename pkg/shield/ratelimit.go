@@ -2,6 +2,7 @@ package shield
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -22,16 +23,23 @@ func NewRateLimitGuard(limiter *crdt.Limiter) *RateLimitGuard {
 
 // Acquire tests velocity rate limit using CRDT sliding window.
 func (g *RateLimitGuard) Acquire(ctx context.Context, identifier string, limit uint64) (Decision, DoneFunc) {
-	if !g.limiter.Allow(identifier, limit) {
+	allowed, count := g.limiter.CheckAndIncrement(identifier, limit)
+	if !allowed {
 		return Decision{
 			Allowed:    false,
 			StatusCode: http.StatusTooManyRequests,
-			Reason:     "429 Too Many Requests: Rate limit exceeded",
+			Reason:     fmt.Sprintf("CRDT rate limit exceeded (%d/%d)", count, limit),
+			Count:      count,
+			Limit:      limit,
 		}, func(int, time.Duration) {}
 	}
 
 	// Rate limiting does not require post-request tracking.
-	return Decision{Allowed: true}, func(int, time.Duration) {}
+	return Decision{
+		Allowed: true,
+		Count:   count,
+		Limit:   limit,
+	}, func(int, time.Duration) {}
 }
 
 // Close is a no-op as limiter lifecycle is managed by caller.

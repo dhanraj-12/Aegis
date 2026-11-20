@@ -21,6 +21,8 @@ func NewChainGuard(guards ...Guard) *ChainGuard {
 // Acquire evaluates each guard in order. If any guard rejects, previous acquisitions are rolled back.
 func (c *ChainGuard) Acquire(ctx context.Context, identifier string, limit uint64) (Decision, DoneFunc) {
 	var doneFuncs []DoneFunc
+	var lastDecision Decision
+	lastDecision.Allowed = true
 
 	for _, g := range c.guards {
 		decision, done := g.Acquire(ctx, identifier, limit)
@@ -32,9 +34,13 @@ func (c *ChainGuard) Acquire(ctx context.Context, identifier string, limit uint6
 			return decision, func(int, time.Duration) {}
 		}
 		doneFuncs = append(doneFuncs, done)
+		if decision.Limit > 0 {
+			lastDecision.Count = decision.Count
+			lastDecision.Limit = decision.Limit
+		}
 	}
 
-	return Decision{Allowed: true}, func(statusCode int, latency time.Duration) {
+	return lastDecision, func(statusCode int, latency time.Duration) {
 		for _, fn := range doneFuncs {
 			fn(statusCode, latency)
 		}
